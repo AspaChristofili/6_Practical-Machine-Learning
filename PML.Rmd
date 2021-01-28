@@ -1,0 +1,224 @@
+### Practical Machine Learning 
+### Prediction Assignment Write-up
+
+========================================================
+```{r, echo=FALSE}
+message(sprintf("Run time: %s\nR version: %s", Sys.time(), R.Version()$version.string))
+```
+
+**Background**
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+**Data**
+
+The training data for this project are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment. 
+
+
+###Prepare the datasets
+
+Transforming the training data into a data table:
+
+```{r}
+require(data.table)
+url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+D <- fread(url)
+```
+
+Transforming the testing data into a data table:
+
+```{r}
+url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+DTest <- fread(url)
+```
+
+The variables that do not have any missing values in the test dataset, will be **predictor candidates** and these variables are: belt, arm, dumbbell & forearm. 
+
+```{r}
+isAnyMissing <- sapply(DTest, function (x) any(is.na(x) | x == ""))
+isPredictor <- !isAnyMissing & grepl("belt|[^(fore)]arm|dumbbell|forearm", names(isAnyMissing))
+predCandidates <- names(isAnyMissing)[isPredictor]
+predCandidates
+```
+
+Sub-setting the primary dataset in such a way, so to include only the **predictor candidates** and the `classe` outcome variable.
+
+```{r}
+varToInclude <- c("classe", predCandidates)
+D <- D[, varToInclude, with=FALSE]
+dim(D)
+names(D)
+```
+
+Making the outcome variable, `classe`, into a factor:
+
+```{r}
+D <- D[, classe := factor(D[, classe])]
+D[, .N, classe]
+```
+
+Splitting the dataset into: 60% training and 40% probing:
+
+```{r}
+require(caret)
+seed <- as.numeric(as.Date("2021-01-28"))
+set.seed(seed)
+inTrain <- createDataPartition(D$classe, p=0.6)
+DTrain <- D[inTrain[[1]]]
+DProbe <- D[-inTrain[[1]]]
+```
+
+Reprocessing the prediciton variables, using centering and scaling: 
+
+```{r}
+X <- DTrain[, predCandidates, with=FALSE]
+preProc <- preProcess(X)
+preProc
+XCS <- predict(preProc, X)
+DTrainCS <- data.table(data.frame(classe = DTrain[, classe], XCS))
+```
+
+Applying centering and scaling to the probing dataset:
+
+```{r}
+X <- DProbe[, predCandidates, with=FALSE]
+XCS <- predict(preProc, X)
+DProbeCS <- data.table(data.frame(classe = DProbe[, classe], XCS))
+```
+
+Checking whether there is near zero variance:
+
+```{r}
+nzv <- nearZeroVar(DTrainCS, saveMetrics=TRUE)
+if (any(nzv$nzv)) nzv else message("No variables with near zero variance")
+```
+
+Examining the groups of prediction variables:
+
+```{r histGroup}
+histGroup <- function (data, regex) {
+  col <- grep(regex, names(data))
+  col <- c(col, which(names(data) == "classe"))
+  require(reshape2)
+  n <- nrow(data)
+  DMelted <- melt(data[, col, with=FALSE][, rownum := seq(1, n)], id.vars=c("rownum", "classe"))
+  require(ggplot2)
+  ggplot(DMelted, aes(x=classe, y=value)) +
+    geom_violin(aes(color=classe, fill=classe), alpha=1/2) +
+#   geom_jitter(aes(color=classe, fill=classe), alpha=1/10) +
+#   geom_smooth(aes(group=1), method="gam", color="black", alpha=1/2, size=2) +
+    facet_wrap(~ variable, scale="free_y") +
+    scale_color_brewer(palette="Spectral") +
+    scale_fill_brewer(palette="Spectral") +
+    labs(x="", y="") +
+    theme(legend.position="none")
+}
+histGroup(DTrainCS, "belt")
+histGroup(DTrainCS, "[^(fore)]arm")
+histGroup(DTrainCS, "dumbbell")
+histGroup(DTrainCS, "forearm")
+```
+
+
+###Prediction model
+
+Using random forest, the out of sample error should be small. The error will be estimated using the 40% probing sample.
+
+Setting up the parallel clusters:
+
+```{r}
+require(parallel)
+require(doParallel)
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+```
+
+Setting up the control parameters:
+
+```{r}
+ctrl <- trainControl(classProbs=TRUE,
+                     savePredictions=TRUE,
+                     allowParallel=TRUE)
+```
+
+Fitting the model over the tuning parameters:
+
+```{r}
+method <- "rf"
+system.time(trainingModel <- train(classe ~ ., data=DTrainCS, method=method))
+```
+
+Stopping the clusters:
+
+```{r}
+stopCluster(cl)
+```
+
+###Model evaluation - training dataset
+
+```{r}
+trainingModel
+hat <- predict(trainingModel, DTrainCS)
+confusionMatrix(hat, DTrain[, classe])
+```
+
+###Model evaluation - probing dataset
+
+```{r}
+hat <- predict(trainingModel, DProbeCS)
+confusionMatrix(hat, DProbeCS[, classe])
+```
+
+###Final model
+
+```{r finalModel}
+varImp(trainingModel)
+trainingModel$finalModel
+```
+
+We see that the **estimated error rate, is less than 1%.**
+
+Saving the training model object, for later:
+
+```{r}
+save(trainingModel, file="trainingModel.RData")
+```
+
+
+###Test data prediction
+
+Loading the training model:
+
+```{r}
+load(file="trainingModel.RData", verbose=TRUE)
+```
+
+Getting the predictions and evaluating them:
+
+```{r}
+DTestCS <- predict(preProc, DTest[, predCandidates, with=FALSE])
+hat <- predict(trainingModel, DTestCS)
+DTest <- cbind(hat , DTest)
+subset(DTest, select=names(DTest)[grep("belt|[^(fore)]arm|dumbbell|forearm", names(DTest), invert=TRUE)])
+```
+###Submitting
+
+The submission files are saved into the folder: /Users/user/Desktop/Data Science_R/PML_files
+
+```{r}
+pml_write_files = function(x){
+  n = length(x)
+  path <- "/Users/user/Desktop/Data Science_R/PML_files"
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=file.path(path, filename),quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(hat)
+```
