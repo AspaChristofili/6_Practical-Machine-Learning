@@ -1,5 +1,5 @@
 ### Practical Machine Learning 
-### Prediction Assignment Write-up
+### Prediction Assignment Write-up 
 
 ========================================================
 ```{r, echo=FALSE}
